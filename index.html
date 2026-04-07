@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+  <title>💪 다이어트 트래커</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #f8f9fa; min-height: 100vh; }
+    input, button, select { font-family: inherit; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+import { createElement as h, useState, useEffect, useRef } from 'https://esm.sh/react@18';
+import { createRoot } from 'https://esm.sh/react-dom@18/client';
+
+const UNITS = ['개','회','분','초'];
+const EMOJIS = ['🏃','💪','🦵','⬆️','🪜','🏋️','🤸','🚴','🧘','🤼','🥊','🏊','⚽','🎽','🔥','🧗','🤾','🏇'];
+const KEY = 'fit-tracker-v2';
+
+// ── 로컬 날짜 (한국시간 등 현지 기준) ──
+const today = () => {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+};
+const fmtDate = s => { const [,m,d]=s.split('-'); return `${+m}/${+d}`; };
+const fmtTime = () => { const n=new Date(); return `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`; };
+const uid = () => Math.random().toString(36).slice(2,8);
+
+const DEFAULT_EXERCISES = [
+  { id:'squat',   label:'스쿼트',       emoji:'🦵', target:100, unit:'개' },
+  { id:'pushup',  label:'팔굽혀펴기',   emoji:'💪', target:60,  unit:'개' },
+  { id:'hangbar', label:'철봉 매달리기', emoji:'🏋️', target:2,   unit:'분' },
+  { id:'pullup',  label:'턱걸이',       emoji:'⬆️', target:10,  unit:'개' },
+  { id:'stairs',  label:'계단오르기',   emoji:'🪜', target:2,   unit:'회' },
+];
+
+function loadData() {
+  try {
+    const r=localStorage.getItem(KEY); if(!r) return null;
+    const d=JSON.parse(r);
+    if(!d.exercises) d.exercises=DEFAULT_EXERCISES;
+    if(!d.logs) d.logs={};
+    if(!d.weights) d.weights=[];
+    if(!d.targetLog) d.targetLog=[];
+    return d;
+  } catch { return null; }
+}
+const saveData = d => { try { localStorage.setItem(KEY,JSON.stringify(d)); } catch {} };
+const emptyData = () => ({ weights:[], logs:{}, exercises:DEFAULT_EXERCISES, targetLog:[] });
+
+function Sheet({ onClose, children }) {
+  return h('div',{onClick:onClose,style:{position:'fixed',inset:0,background:'rgba(0,0,0,0.45)',zIndex:100,display:'flex',alignItems:'flex-end',justifyContent:'center'}},
+    h('div',{onClick:e=>e.stopPropagation(),style:{background:'white',borderRadius:'20px 20px 0 0',padding:24,width:'100%',maxWidth:430,maxHeight:'90vh',overflowY:'auto'}},children)
+  );
+}
+
+function EmojiPicker({value,onChange}) {
+  return h('div',{style:{display:'flex',flexWrap:'wrap',gap:6,marginBottom:4}},
+    EMOJIS.map(e=>h('button',{key:e,onClick:()=>onChange(e),style:{fontSize:22,padding:'4px 6px',borderRadius:8,border:`2px solid ${value===e?'#667eea':'transparent'}`,background:value===e?'#f0f0ff':'white',cursor:'pointer'}},e))
+  );
+}
+
+// 미니 스파크라인 (몸무게용)
+function Sparkline({ weights, width=120, height=36 }) {
+  if (weights.length < 2) return null;
+  const vals = weights.map(w=>w.weight);
+  const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx-mn||1;
+  const pts = vals.map((v,i)=>`${(i/(vals.length-1))*width},${height-((v-mn)/rng)*height}`).join(' ');
+  return h('svg',{width,height,viewBox:`0 0 ${width} ${height}`,style:{overflow:'visible'}},
+    h('polyline',{fill:'none',stroke:'rgba(255,255,255,0.7)',strokeWidth:2,strokeLinejoin:'round',strokeLinecap:'round',points:pts}),
+    h('circle',{cx:(vals.length-1)/(vals.length-1)*width,cy:height-((vals[vals.length-1]-mn)/rng)*height,r:3,fill:'white'})
+  );
+}
+
+export default function App() {
+  const [data, setData] = useState(() => loadData() || emptyData());
+  const [tab, setTab] = useState('today');
+  const [logModal, setLogModal] = useState(null);
+  const [logInput, setLogInput] = useState('');
+  const [addModal, setAddModal] = useState(false);
+  const [editModal, setEditModal] = useState(null);
+  const [wInput, setWInput] = useState('');
+  const [toast, setToast] = useState(null);
+  const toastRef = useRef(null);
+
+  // add form
+  const [nLabel,setNLabel]=useState(''); const [nEmoji,setNEmoji]=useState('🏃');
+  const [nTarget,setNTarget]=useState(''); const [nUnit,setNUnit]=useState('개');
+  // edit form
+  const [eLabel,setELabel]=useState(''); const [eEmoji,setEEmoji]=useState('');
+  const [eTarget,setETarget]=useState(''); const [eUnit,setEUnit]=useState('개');
+
+  useEffect(()=>{ saveData(data); },[data]);
+
+  const showToast=(msg,type='ok')=>{
+    setToast({msg,type}); clearTimeout(toastRef.current);
+    toastRef.current=setTimeout(()=>setToast(null),2200);
+  };
+
+  const tod=today();
+  const exercises=data.exercises;
+  const todLogs=data.logs[tod]||{};
+  const todWeight=data.weights.find(w=>w.date===tod);
+  const recentWeights=data.weights.slice(-14);
+  const startW=data.weights.length?data.weights[0].weight:86;
+  const latestW=data.weights.length?data.weights[data.weights.length-1].weight:null;
+  const lost=latestW?(startW-latestW).toFixed(1):0;
+
+  const getDone=(id,lo)=>((lo||todLogs)[id]||[]).reduce((s,e)=>s+e.amount,0);
+
+  // weight submit
+  const submitW=()=>{
+    const w=parseFloat(wInput); if(isNaN(w)||w<30||w>200) return;
+    setData(p=>({...p,weights:[...p.weights.filter(x=>x.date!==tod),{date:tod,weight:w}].sort((a,b)=>a.date.localeCompare(b.date))}));
+    setWInput(''); showToast('✅ 몸무게 저장됨!');
+  };
+
+  // log exercise
+  const submitLog=()=>{
+    const amt=parseFloat(logInput); if(!logModal||isNaN(amt)||amt<=0) return;
+    const id=logModal;
+    setData(p=>{const pl=p.logs||{},pd=pl[tod]||{},pe=pd[id]||[];
+      return {...p,logs:{...pl,[tod]:{...pd,[id]:[...pe,{amount:amt,time:fmtTime()}]}}};});
+    setLogInput(''); setLogModal(null); showToast(`+${amt} 기록됨 💪`);
+  };
+  const undoLast=id=>{
+    setData(p=>{const pl=p.logs||{},pd=pl[tod]||{},pe=[...(pd[id]||[])];
+      if(!pe.length) return p; pe.pop();
+      return {...p,logs:{...pl,[tod]:{...pd,[id]:pe}}};});
+  };
+
+  // add exercise
+  const submitAdd=()=>{
+    const t=parseFloat(nTarget); if(!nLabel.trim()||isNaN(t)||t<=0) return;
+    const ex={id:uid(),label:nLabel.trim(),emoji:nEmoji,target:t,unit:nUnit};
+    setData(p=>({...p,exercises:[...p.exercises,ex]}));
+    setNLabel('');setNEmoji('🏃');setNTarget('');setNUnit('개');
+    setAddModal(false); showToast(`✅ ${ex.label} 추가됨!`);
+  };
+
+  // edit exercise
+  const openEdit=ex=>{setEditModal(ex);setELabel(ex.label);setEEmoji(ex.emoji);setETarget(String(ex.target));setEUnit(ex.unit);};
+  const submitEdit=()=>{
+    if(!editModal) return;
+    const t=parseFloat(eTarget); if(!eLabel.trim()||isNaN(t)||t<=0) return;
+    if(t<editModal.target){showToast('목표는 줄일 수 없어요','err');return;}
+    const updated={...editModal,label:eLabel.trim(),emoji:eEmoji,target:t,unit:eUnit};
+    if(t>editModal.target){
+      setData(p=>({...p,exercises:p.exercises.map(e=>e.id===editModal.id?updated:e),
+        targetLog:[...(p.targetLog||[]),{date:tod,id:editModal.id,label:editModal.label,from:editModal.target,to:t,unit:eUnit}]}));
+    } else {
+      setData(p=>({...p,exercises:p.exercises.map(e=>e.id===editModal.id?updated:e)}));
+    }
+    setEditModal(null); showToast('✅ 수정됨!');
+  };
+  const deleteEx=id=>{setData(p=>({...p,exercises:p.exercises.filter(e=>e.id!==id)}));setEditModal(null);showToast('삭제됨');};
+
+  const completedCount=exercises.filter(ex=>getDone(ex.id)>=ex.target).length;
+
+  // 기록 탭 차트
+  const cw=recentWeights;
+  const minW2=cw.length?Math.min(...cw.map(w=>w.weight))-0.5:83;
+  const maxW2=cw.length?Math.max(...cw.map(w=>w.weight))+0.5:87;
+  const rng2=maxW2-minW2||1; const CH=130,CW=300;
+  const toY=w=>CH-((w-minW2)/rng2)*CH;
+  const toX=i=>cw.length<2?CW/2:(i/(cw.length-1))*CW;
+  const pts=cw.map((w,i)=>`${toX(i)},${toY(w.weight)}`).join(' ');
+  const statDates=Object.keys(data.logs).sort().slice(-14);
+
+  return h('div',{style:{maxWidth:430,margin:'0 auto',background:'#f8f9fa',minHeight:'100vh',paddingBottom:40}},
+
+    // Toast
+    toast&&h('div',{style:{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',zIndex:300,
+      background:toast.type==='err'?'#f44336':'#1a1a2e',color:'white',borderRadius:14,padding:'13px 22px',
+      fontSize:13,fontWeight:600,boxShadow:'0 4px 20px rgba(0,0,0,0.3)',maxWidth:320,textAlign:'center',zIndex:400}},toast.msg),
+
+    // ── Log Modal ──
+    logModal&&(()=>{
+      const ex=exercises.find(e=>e.id===logModal); if(!ex) return null;
+      const done=getDone(logModal),val=parseFloat(logInput),ok=!isNaN(val)&&val>0;
+      const entries=todLogs[logModal]||[];
+      return h(Sheet,{onClose:()=>setLogModal(null)},
+        h('div',{style:{fontSize:16,fontWeight:700,marginBottom:2}},`${ex.emoji} ${ex.label}`),
+        h('div',{style:{fontSize:13,color:'#999',marginBottom:12}},
+          '오늘: ',h('b',{style:{color:'#667eea'}},done),`/${ex.target}${ex.unit}`,
+          done<ex.target&&` · 남은 ${ex.target-done}${ex.unit}`),
+        entries.length>0&&h('div',{style:{background:'#f8f9fa',borderRadius:10,padding:'10px 12px',marginBottom:12}},
+          ...entries.map((e,i)=>h('div',{key:i,style:{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0',color:'#555'}},
+            h('span',{style:{color:'#aaa'}},e.time),h('span',null,`+${e.amount}${ex.unit}`))),
+          h('div',{style:{borderTop:'1px solid #eee',marginTop:6,paddingTop:6,display:'flex',justifyContent:'space-between',fontWeight:700,fontSize:13}},
+            h('span',{style:{color:'#aaa'}},'합계'),h('span',{style:{color:'#667eea'}},`${done}${ex.unit}`))
+        ),
+        h('div',{style:{display:'flex',gap:8,marginBottom:8}},
+          h('input',{type:'number',autoFocus:true,min:1,placeholder:`몇 ${ex.unit}?`,value:logInput,
+            onChange:e=>setLogInput(e.target.value),onKeyDown:e=>e.key==='Enter'&&ok&&submitLog(),
+            style:{flex:1,padding:'12px 14px',borderRadius:10,border:`1.5px solid ${ok?'#667eea':'#ddd'}`,fontSize:16,outline:'none'}}),
+          h('button',{onClick:submitLog,disabled:!ok,style:{padding:'12px 20px',borderRadius:10,border:'none',
+            background:ok?'linear-gradient(135deg,#667eea,#764ba2)':'#eee',color:ok?'white':'#bbb',fontWeight:700,fontSize:15,cursor:'pointer'}},'추가')
+        ),
+        h('div',{style:{display:'flex',gap:8}},
+          entries.length>0&&h('button',{onClick:()=>{undoLast(logModal);setLogModal(null);},
+            style:{flex:1,padding:'10px 0',borderRadius:10,border:'1.5px solid #eee',background:'white',color:'#f44336',fontSize:13,cursor:'pointer',fontWeight:600}},'↩ 마지막 취소'),
+          h('button',{onClick:()=>setLogModal(null),style:{flex:1,padding:'10px 0',borderRadius:10,border:'1.5px solid #eee',background:'white',color:'#999',fontSize:13,cursor:'pointer'}},'닫기')
+        )
+      );
+    })(),
+
+    // ── Add Modal ──
+    addModal&&h(Sheet,{onClose:()=>setAddModal(false)},
+      h('div',{style:{fontSize:16,fontWeight:700,marginBottom:16}},'➕ 운동 추가'),
+      h('div',{style:{fontSize:13,color:'#888',marginBottom:8}},'이모지'),
+      h(EmojiPicker,{value:nEmoji,onChange:setNEmoji}),
+      h('input',{value:nLabel,onChange:e=>setNLabel(e.target.value),placeholder:'운동 이름',
+        style:{width:'100%',padding:'11px 14px',borderRadius:10,border:'1.5px solid #ddd',fontSize:15,outline:'none',marginBottom:10,marginTop:10}}),
+      h('div',{style:{display:'flex',gap:8,marginBottom:16}},
+        h('input',{type:'number',min:1,value:nTarget,onChange:e=>setNTarget(e.target.value),placeholder:'목표',
+          style:{flex:1,padding:'11px 14px',borderRadius:10,border:'1.5px solid #ddd',fontSize:15,outline:'none'}}),
+        h('select',{value:nUnit,onChange:e=>setNUnit(e.target.value),
+          style:{padding:'11px 14px',borderRadius:10,border:'1.5px solid #ddd',fontSize:15,outline:'none',background:'white',cursor:'pointer'}},
+          UNITS.map(u=>h('option',{key:u,value:u},u)))
+      ),
+      h('div',{style:{display:'flex',gap:8}},
+        h('button',{onClick:()=>setAddModal(false),style:{flex:1,padding:'12px 0',borderRadius:10,border:'1.5px solid #eee',background:'white',color:'#999',fontSize:14,cursor:'pointer'}},'취소'),
+        h('button',{onClick:submitAdd,disabled:!nLabel.trim()||!(parseFloat(nTarget)>0),
+          style:{flex:2,padding:'12px 0',borderRadius:10,border:'none',
+          background:nLabel.trim()&&parseFloat(nTarget)>0?'linear-gradient(135deg,#667eea,#764ba2)':'#eee',
+          color:nLabel.trim()&&parseFloat(nTarget)>0?'white':'#bbb',fontWeight:700,fontSize:14,cursor:'pointer'}},'추가')
+      )
+    ),
+
+    // ── Edit Modal ──
+    editModal&&h(Sheet,{onClose:()=>setEditModal(null)},
+      h('div',{style:{fontSize:16,fontWeight:700,marginBottom:16}},'✏️ 운동 수정'),
+      h('div',{style:{fontSize:13,color:'#888',marginBottom:8}},'이모지'),
+      h(EmojiPicker,{value:eEmoji,onChange:setEEmoji}),
+      h('input',{value:eLabel,onChange:e=>setELabel(e.target.value),
+        style:{width:'100%',padding:'11px 14px',borderRadius:10,border:'1.5px solid #ddd',fontSize:15,outline:'none',marginBottom:10,marginTop:10}}),
+      h('div',{style:{fontSize:13,color:'#888',marginBottom:6}},`목표 (현재 ${editModal.target}${editModal.unit} 이상)`),
+      h('div',{style:{display:'flex',gap:8,marginBottom:16}},
+        h('input',{type:'number',min:editModal.target,value:eTarget,onChange:e=>setETarget(e.target.value),
+          style:{flex:1,padding:'11px 14px',borderRadius:10,border:'1.5px solid #ddd',fontSize:15,outline:'none'}}),
+        h('select',{value:eUnit,onChange:e=>setEUnit(e.target.value),
+          style:{padding:'11px 14px',borderRadius:10,border:'1.5px solid #ddd',fontSize:15,outline:'none',background:'white',cursor:'pointer'}},
+          UNITS.map(u=>h('option',{key:u,value:u},u)))
+      ),
+      h('div',{style:{display:'flex',gap:8,marginBottom:10}},
+        h('button',{onClick:()=>setEditModal(null),style:{flex:1,padding:'12px 0',borderRadius:10,border:'1.5px solid #eee',background:'white',color:'#999',fontSize:14,cursor:'pointer'}},'취소'),
+        h('button',{onClick:submitEdit,style:{flex:2,padding:'12px 0',borderRadius:10,border:'none',background:'linear-gradient(135deg,#667eea,#764ba2)',color:'white',fontWeight:700,fontSize:14,cursor:'pointer'}},'저장')
+      ),
+      h('button',{onClick:()=>deleteEx(editModal.id),style:{width:'100%',padding:'11px 0',borderRadius:10,border:'1.5px solid #ffcdd2',background:'#fff5f5',color:'#e53935',fontSize:14,cursor:'pointer',fontWeight:600}},'🗑 이 운동 삭제')
+    ),
+
+    // ══ HEADER (몸무게 + 스파크라인 + 오늘 진행) ══
+    h('div',{style:{background:'linear-gradient(135deg,#667eea 0%,#764ba2 100%)',padding:'48px 20px 0',color:'white'}},
+
+      // 상단: 현재 몸무게 + 감량
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}},
+        h('div',null,
+          h('div',{style:{fontSize:12,opacity:0.75,marginBottom:4}},'💪 다이어트 트래커'),
+          h('div',{style:{fontSize:42,fontWeight:800,lineHeight:1}},latestW??86,h('span',{style:{fontSize:20,fontWeight:500}},'kg')),
+          h('div',{style:{fontSize:12,opacity:0.75,marginTop:4}},`시작 ${startW}kg`)
+        ),
+        h('div',{style:{textAlign:'right'}},
+          h('div',{style:{fontSize:28,fontWeight:800,color:parseFloat(lost)>0?'#a8edbc':'rgba(255,255,255,0.5)',lineHeight:1}},
+            parseFloat(lost)>0?`-${lost}`:'±0',h('span',{style:{fontSize:15}},'kg')),
+          h('div',{style:{fontSize:12,opacity:0.75,marginTop:4}},'누적 감량'),
+          recentWeights.length>=2&&h('div',{style:{marginTop:8}},h(Sparkline,{weights:recentWeights}))
+        )
+      ),
+
+      // 몸무게 입력바
+      h('div',{style:{background:'rgba(255,255,255,0.15)',borderRadius:14,padding:12,marginBottom:16,backdropFilter:'blur(4px)'}},
+        h('div',{style:{fontSize:12,opacity:0.8,marginBottom:8}},'⚖️ 오늘 몸무게 기록'),
+        h('div',{style:{display:'flex',gap:8}},
+          h('input',{type:'number',step:0.1,min:30,max:200,inputMode:'decimal',
+            placeholder:todWeight?`오늘: ${todWeight.weight}kg`:'kg 입력...',
+            value:wInput,onChange:e=>setWInput(e.target.value),
+            onKeyDown:e=>e.key==='Enter'&&submitW(),
+            style:{flex:1,padding:'10px 14px',borderRadius:10,border:'none',background:'rgba(255,255,255,0.25)',color:'white',fontSize:16,outline:'none','::placeholder':{color:'rgba(255,255,255,0.6)'}}}),
+          h('button',{onClick:submitW,style:{padding:'10px 18px',borderRadius:10,border:'none',background:'white',color:'#667eea',fontWeight:700,cursor:'pointer',fontSize:15}},'기록')
+        ),
+        todWeight&&h('div',{style:{fontSize:12,color:'rgba(255,255,255,0.8)',marginTop:6}},`✅ 오늘 ${todWeight.weight}kg`)
+      ),
+
+      // 탭 (헤더 하단에 붙어있게)
+      h('div',{style:{display:'flex',marginLeft:-20,marginRight:-20}},
+        ['today','history'].map(key=>h('button',{key,onClick:()=>setTab(key),style:{
+          flex:1,padding:'13px 0',border:'none',cursor:'pointer',fontSize:15,fontWeight:tab===key?700:400,
+          background:tab===key?'white':'transparent',
+          color:tab===key?'#667eea':'rgba(255,255,255,0.7)',
+          borderRadius:tab===key?'12px 12px 0 0':'0',
+          marginBottom:0,transition:'all 0.2s'
+        }},key==='today'?'오늘':'기록'))
+      )
+    ),
+
+    // ══ CONTENT ══
+    h('div',{style:{background:'white',minHeight:400}},
+    h('div',{style:{padding:16}},
+
+      // ── 오늘 탭 ──
+      tab==='today'&&h('div',null,
+        h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}},
+          h('div',null,
+            h('div',{style:{fontSize:15,fontWeight:700,color:'#333'}},'🏃 오늘의 운동'),
+            h('div',{style:{fontSize:12,color:completedCount===exercises.length?'#4caf50':'#aaa',marginTop:2}},
+              `${completedCount}/${exercises.length} 완료${completedCount===exercises.length?' 🎉':''}`)
+          ),
+          h('button',{onClick:()=>setAddModal(true),style:{padding:'8px 14px',borderRadius:10,border:'none',
+            background:'linear-gradient(135deg,#667eea,#764ba2)',color:'white',fontWeight:700,fontSize:13,cursor:'pointer'}},'+ 추가')
+        ),
+
+        exercises.length===0&&h('div',{style:{textAlign:'center',color:'#ccc',padding:'40px 0',fontSize:14}},'+ 추가 버튼으로 운동을 등록하세요'),
+
+        exercises.map(ex=>{
+          const done=getDone(ex.id),pct=Math.min(100,(done/ex.target)*100),completed=done>=ex.target;
+          const entries=todLogs[ex.id]||[];
+          return h('div',{key:ex.id,style:{marginBottom:20,paddingBottom:20,borderBottom:'1px solid #f0f0f0'}},
+            h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:8}},
+              h('span',{style:{fontSize:22}},ex.emoji),
+              h('div',{style:{flex:1}},
+                h('div',{style:{fontWeight:700,fontSize:15,color:completed?'#4caf50':'#222'}},`${ex.label}${completed?' ✅':''}`),
+                h('div',{style:{fontSize:12,color:'#bbb',marginTop:1}},`목표 ${ex.target}${ex.unit}`)
+              ),
+              h('button',{onClick:()=>openEdit(ex),style:{padding:'4px 10px',borderRadius:6,border:'1.5px solid #eee',background:'white',color:'#bbb',fontSize:12,cursor:'pointer'}},'수정')
+            ),
+            h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:8}},
+              h('div',{style:{flex:1,background:'#f0f0f0',borderRadius:99,height:10,overflow:'hidden'}},
+                h('div',{style:{background:completed?'linear-gradient(90deg,#43e97b,#38f9d7)':'linear-gradient(90deg,#667eea,#764ba2)',
+                  borderRadius:99,height:'100%',width:`${pct}%`,transition:'width 0.35s'}})
+              ),
+              h('span',{style:{fontSize:13,fontWeight:700,color:completed?'#4caf50':'#667eea',minWidth:72,textAlign:'right'}},`${done}/${ex.target}${ex.unit}`)
+            ),
+            entries.length>0&&h('div',{style:{display:'flex',flexWrap:'wrap',gap:5,marginBottom:8}},
+              entries.map((e,i)=>h('span',{key:i,style:{background:'#ede7f6',color:'#5c35b5',borderRadius:20,padding:'4px 11px',fontSize:12,fontWeight:600}},
+                `+${e.amount}${ex.unit}`,h('span',{style:{color:'#b39ddb',fontWeight:400,fontSize:11}},` ${e.time}`)))
+            ),
+            h('button',{onClick:()=>{setLogModal(ex.id);setLogInput('');},style:{
+              width:'100%',padding:'10px 0',borderRadius:10,
+              border:completed?'1.5px solid #c8f0d4':'1.5px dashed #c5cae9',
+              background:completed?'#f0fdf4':'#f5f6ff',
+              color:completed?'#43a047':'#667eea',fontWeight:600,fontSize:13,cursor:'pointer'}},
+              completed?'✓ 완료 · 더 추가하기':'+ 기록 추가')
+          );
+        })
+      ),
+
+      // ── 기록 탭 ──
+      tab==='history'&&h('div',null,
+
+        // 몸무게 꺾은선 차트
+        h('div',{style:{marginBottom:24}},
+          h('div',{style:{fontSize:14,fontWeight:700,color:'#333',marginBottom:12}},'📉 몸무게 변화'),
+          cw.length<2
+            ?h('div',{style:{textAlign:'center',color:'#ccc',padding:'32px 0',fontSize:13,background:'#f8f9fa',borderRadius:12}},'몸무게를 2일 이상 기록하면 그래프가 나타나요')
+            :h('div',{style:{background:'#f8f9fa',borderRadius:12,padding:16}},
+              h('svg',{viewBox:`-14 -14 ${CW+28} ${CH+36}`,width:'100%',style:{overflow:'visible'}},
+                h('defs',null,h('linearGradient',{id:'wg',x1:'0',y1:'0',x2:'1',y2:'0'},
+                  h('stop',{offset:'0%',stopColor:'#667eea'}),h('stop',{offset:'100%',stopColor:'#764ba2'}))),
+                h('polyline',{fill:'none',stroke:'url(#wg)',strokeWidth:3,strokeLinejoin:'round',strokeLinecap:'round',points:pts}),
+                cw.map((w,i)=>h('g',{key:i},
+                  h('circle',{cx:toX(i),cy:toY(w.weight),r:5,fill:'#764ba2',stroke:'white',strokeWidth:2}),
+                  h('text',{x:toX(i),y:toY(w.weight)-10,textAnchor:'middle',fontSize:10,fill:'#555',fontWeight:600},w.weight),
+                  (i===0||i===cw.length-1||cw.length<=7)&&h('text',{x:toX(i),y:CH+22,textAnchor:'middle',fontSize:9,fill:'#bbb'},fmtDate(w.date))
+                ))
+              )
+            )
+        ),
+
+        // 몸무게 목록
+        h('div',{style:{marginBottom:24}},
+          h('div',{style:{fontSize:14,fontWeight:700,color:'#333',marginBottom:12}},'📋 몸무게 기록'),
+          data.weights.length===0
+            ?h('div',{style:{textAlign:'center',color:'#ccc',padding:'24px 0',fontSize:13}},'아직 기록이 없어요')
+            :h('div',null,[...data.weights].reverse().map((w,i)=>{
+              const prev=data.weights[data.weights.length-1-i-1];
+              const diff=prev?(w.weight-prev.weight).toFixed(1):null;
+              return h('div',{key:w.date,style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'11px 0',borderBottom:'1px solid #f5f5f5'}},
+                h('div',{style:{color:'#888',fontSize:14}},w.date.slice(5).replace('-','/')),
+                h('div',{style:{display:'flex',alignItems:'center',gap:10}},
+                  diff!=null&&h('span',{style:{fontSize:12,color:parseFloat(diff)<0?'#4caf50':parseFloat(diff)>0?'#f44336':'#ccc',fontWeight:600}},parseFloat(diff)>0?`+${diff}`:diff,'kg'),
+                  h('span',{style:{fontWeight:700,fontSize:17,color:'#222'}},w.weight,'kg')
+                )
+              );
+            }))
+        ),
+
+        // 운동 통계
+        h('div',{style:{marginBottom:24}},
+          h('div',{style:{fontSize:14,fontWeight:700,color:'#333',marginBottom:4}},'🏅 운동 통계'),
+          h('div',{style:{fontSize:12,color:'#bbb',marginBottom:16}},'최근 14일'),
+          statDates.length===0
+            ?h('div',{style:{textAlign:'center',color:'#ccc',padding:'24px 0',fontSize:13}},'운동 기록이 없어요')
+            :exercises.map(ex=>{
+              const dayTotals=statDates.map(date=>({date,total:getDone(ex.id,data.logs[date]||{})})).filter(d=>d.total>0);
+              if(!dayTotals.length) return null;
+              const totalAmt=dayTotals.reduce((s,d)=>s+d.total,0);
+              const avgAmt=(totalAmt/dayTotals.length).toFixed(1);
+              const maxAmt=Math.max(...dayTotals.map(d=>d.total));
+              const completeDays=dayTotals.filter(d=>d.total>=ex.target).length;
+              const barDays=dayTotals.slice(-7), barMax=Math.max(...barDays.map(d=>d.total),ex.target);
+              return h('div',{key:ex.id,style:{background:'#f8f9fa',borderRadius:14,padding:14,marginBottom:12}},
+                h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:10}},
+                  h('span',{style:{fontSize:20}},ex.emoji),
+                  h('div',{style:{flex:1}},
+                    h('div',{style:{fontSize:14,fontWeight:700,color:'#333'}},ex.label),
+                    h('div',{style:{fontSize:11,color:'#aaa'}},`${dayTotals.length}일 기록`)
+                  ),
+                  h('div',{style:{textAlign:'right'}},
+                    h('div',{style:{fontSize:16,fontWeight:800,color:'#667eea'}},`${totalAmt}${ex.unit}`),
+                    h('div',{style:{fontSize:10,color:'#aaa'}},'누적')
+                  )
+                ),
+                h('div',{style:{display:'flex',gap:6,marginBottom:10}},
+                  [{label:'일평균',val:`${avgAmt}${ex.unit}`},{label:'최고',val:`${maxAmt}${ex.unit}`},{label:'목표달성',val:`${completeDays}일`}]
+                  .map(({label,val})=>h('div',{key:label,style:{flex:1,background:'white',borderRadius:8,padding:'7px 0',textAlign:'center'}},
+                    h('div',{style:{fontSize:13,fontWeight:700,color:'#444'}},val),
+                    h('div',{style:{fontSize:10,color:'#bbb',marginTop:1}},label)
+                  ))
+                ),
+                barDays.length>0&&h('div',{style:{display:'flex',alignItems:'flex-end',gap:3,height:44}},
+                  barDays.map((d,i)=>{
+                    const comp=d.total>=ex.target,bh=Math.max(4,(d.total/barMax)*40);
+                    return h('div',{key:i,style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:2}},
+                      h('div',{style:{width:'100%',height:bh,borderRadius:3,background:comp?'linear-gradient(180deg,#43e97b,#38f9d7)':'linear-gradient(180deg,#667eea,#764ba2)'}}),
+                      h('div',{style:{fontSize:9,color:'#ccc',whiteSpace:'nowrap'}},fmtDate(d.date))
+                    );
+                  })
+                )
+              );
+            }).filter(Boolean)
+        )
+      )
+    ))
+  );
+}
+
+createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body>
+</html>
